@@ -17,6 +17,7 @@ app.frontend-url=http://localhost:5173
 spring.mail.host=localhost
 spring.mail.port=25
 app.mail.from=no-reply@devs8.tech
+app.dev.log-reset-link=false
 
 app.twilio.account-sid=CAMBIAR
 app.twilio.auth-token=CAMBIAR
