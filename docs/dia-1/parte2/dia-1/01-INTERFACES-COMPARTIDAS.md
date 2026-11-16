@@ -1,0 +1,216 @@
+# DÍA 1 · INTERFACES COMPARTIDAS (congeladas)
+
+Estas son las clases, métodos y archivos que **todas las IA deben usar con exactamente estos nombres**. Es lo que evita que el chat de la mañana y el de la noche generen código incompatible.
+Si una tarea necesita cambiar algo de aquí: primero se edita este archivo, se anota en `06-ESTADO.md` → "Decisiones", y después se corrige el código.
+
+Adjunta solo la sección que toca (§1 a §4 backend, §5 a §7 frontend).
+
+---
+## BACKEND
+
+### §1 Paquetes, dependencias y convenciones
+- `groupId` `com.rutaoax`, `artifactId` `rutaoax-backend`, paquete base `com.rutaoax`, Java 21, Maven. **Sin Lombok** (getters y setters explícitos; DTOs como `record`).
+- Dependencias: `spring-boot-starter-web`, `-security`, `-data-jpa`, `-validation`, `-mail`, `flyway-core` y `flyway-mysql`, `mysql-connector-j`, `jjwt-api`, `jjwt-impl`, `jjwt-jackson` (0.12.6).
+- Puerto `9250`. `spring.jpa.hibernate.ddl-auto=none`, `spring.jpa.open-in-view=false`.
+- Cada módulo vive en su paquete (`com.rutaoax.usuario`, `com.rutaoax.auth`, …). Entidades y enums en la raíz del módulo; DTOs en `dto/`.
+- Enums (paquete → valores):
+  - `usuario.RolNombre`: `ADMIN, NEGOCIO, REPARTIDOR, CLIENTE`
+  - `vehiculo.TipoVehiculo`: `COMBI, MOTOCICLETA, CAMIONETA, BICICLETA, AUTOMOVIL` · `vehiculo.EstadoVehiculo`: `ACTIVO, MANTENIMIENTO`
+  - `recorrido.EstadoRecorrido`: `PLANEADO, EN_CURSO, FINALIZADO`
+  - `pedido.Modalidad`: `NEGOCIO, ABIERTO` · `pedido.EstadoPedido`: `PENDIENTE, ASIGNADO, EN_CAMINO, ENTREGADO, NO_ENTREGADO`
+  - `notificacion.Canal`: `EMAIL, SMS, WHATSAPP` · `notificacion.EstadoEnvio`: `ENVIADO, FALLIDO`
+  - Todos con `@Enumerated(EnumType.STRING)`.
+
+### §2 Entidades y repositorios (nombres exactos)
+| Tabla | Clase | Paquete | Notas |
+|---|---|---|---|
+| roles | `Rol` | usuario | `id`, `RolNombre nombre` |
+| usuarios | `Usuario` | usuario | `id, nombre, email, passwordHash, telefono, avatarUrl, activo, creadoEn, Set<Rol> roles` (`@ManyToMany` LAZY con `@JoinTable(name="usuario_roles")`) |
+| negocios | `Negocio` | negocio | `propietario` (`@OneToOne` LAZY → Usuario) |
+| repartidores | `Repartidor` | negocio | `usuario` (`@OneToOne` LAZY), `negocio` (`@ManyToOne` LAZY, null = independiente) |
+| vehiculos | `Vehiculo` | vehiculo | `negocio` (`@ManyToOne` LAZY) |
+| recorridos | `Recorrido` | recorrido | `repartidor`, `vehiculo` (null permitido), `fecha`, `estado` |
+| pedidos | `Pedido` | pedido | `negocio`, `cliente` (Usuario), `recorrido` (todos `@ManyToOne` LAZY y opcionales), `BigDecimal` en dinero y `lat/lng` |
+| mensajes | `Mensaje` | mensaje | `pedido`, `remitente`, `destinatario` |
+| tokens_revocados | `TokenRevocado` | auth | `jti`, `expiraEn` |
+| password_reset_tokens | `PasswordResetToken` | auth | `usuario`, `tokenHash`, `expiraEn`, `usado` |
+| notificaciones_log | `NotificacionLog` | notificacion | `canal`, `destino`, `evento`, `estado`, `detalle`, `pedidoId`, `usuarioId` (ids simples, sin relación) |
+
+Repositorios `XxxRepository extends JpaRepository<Xxx, Long>` en el mismo paquete. Métodos ya definidos:
+```java
+// UsuarioRepository
+@EntityGraph(attributePaths = "roles") Optional<Usuario> findByEmail(String email);
+boolean existsByEmail(String email);
+// RolRepository
+Optional<Rol> findByNombre(RolNombre nombre);
+// NegocioRepository
+Optional<Negocio> findByPropietarioId(Long usuarioId);
+// RepartidorRepository
+@EntityGraph(attributePaths = {"usuario", "negocio"}) Optional<Repartidor> findByUsuarioId(Long usuarioId);
+// TokenRevocadoRepository
+boolean existsByJti(String jti);
+void deleteByExpiraEnBefore(LocalDateTime fecha);
+// PasswordResetTokenRepository
+Optional<PasswordResetToken> findByTokenHash(String hash);
+```
+`Zonas` (datos de `01-BASE-DATOS.md`) viven en `com.rutaoax.common.ZonaCatalogo`:
+```java
+public record Zona(String nombre, double lat, double lng) {}
+public final class ZonaCatalogo {
+  public static List<Zona> todas();
+  public static boolean existe(String nombre);
+  public static double[] coordenadas(String zona, long semilla); // [lat,lng], desplazamiento determinista de ±0.004
+}
+```
+
+### §3 Comunes (`com.rutaoax.common`)
+```java
+@JsonInclude(NON_NULL)
+public record ApiError(LocalDateTime timestamp, int status, String error, String message, String path, Map<String,String> errores) {}
+
+public record PageResponse<T>(List<T> content, int page, int size, long totalElements, int totalPages) {
+  public static <T> PageResponse<T> from(Page<T> p);
+}
+// Excepciones (RuntimeException) y su código:
+BadRequestException → 400   UnauthorizedException → 401   ForbiddenException → 403
+NotFoundException → 404     ConflictException → 409
+// Todas reciben (String mensaje).
+```
+`GlobalExceptionHandler` (`@RestControllerAdvice`) devuelve `ApiError` con estos códigos: las 5 excepciones propias, `MethodArgumentNotValidException`/`ConstraintViolationException` → 422 con `errores` (campo → mensaje), `HttpMessageNotReadableException` → 400, `NoResourceFoundException`/`NoHandlerFoundException` → 404, `AccessDeniedException` → 403, `Exception` → 500 con mensaje genérico (el detalle solo al log). El campo `error` es el texto estándar del código HTTP.
+
+Validación de contraseña: `@PasswordSegura` en `com.rutaoax.common.validation` (anotación + `ConstraintValidator`) con la regex de `00-CONTEXTO.md` y el mensaje "La contraseña debe tener mínimo 8 caracteres, una mayúscula, un número y un carácter especial".
+
+### §4 Auth, usuario y notificación (cómo hablan entre sí)
+```java
+// auth.JwtService
+String generateToken(Usuario u);              // claims: sub=email, uid, roles (List<String>), jti (UUID), iat, exp
+boolean isValid(String token);                // firma y vencimiento
+String getEmail(String token);
+String getJti(String token);
+LocalDateTime getExpiration(String token);
+long getExpirationMs();                       // app.jwt.expiration-ms
+
+// auth.UsuarioPrincipal implements UserDetails  (el usuario autenticado en todo el backend)
+Long getId(); String getEmail(); Set<String> getRoles();   // roles sin prefijo: "ADMIN"
+// authorities = "ROLE_" + rol. En controladores: @AuthenticationPrincipal UsuarioPrincipal yo
+
+// usuario.UsuarioService
+UsuarioDTO aDTO(Usuario u);     // ÚNICA forma de construir UsuarioDTO (incluye perfil)
+
+// usuario.dto
+public record PerfilDTO(Long negocioId, String negocioNombre, String tipoRepartidor) {}  // "EMPRESA" | "INDEPENDIENTE" | null
+public record UsuarioDTO(Long id, String nombre, String email, String telefono, String avatarUrl,
+                         boolean activo, List<String> roles, PerfilDTO perfil) {}
+
+// auth.dto
+public record LoginRequest(@NotBlank @Email String email, @NotBlank String password) {}
+public record LoginResponse(String token, String tipo, LocalDateTime expiraEn, UsuarioDTO usuario) {}  // tipo = "Bearer"
+
+// notificacion.EmailService  (se crea en HU-06 y lo reutilizan los demás días)
+@Async void enviar(String destino, String asunto, String cuerpoHtml, String evento, Long usuarioId);
+// Nunca lanza excepción: guarda en NotificacionLog (ENVIADO o FALLIDO con detalle).
+```
+`JwtFilter` (`OncePerRequestFilter`): lee `Authorization: Bearer`, valida token, verifica que su `jti` no esté en `tokens_revocados` y que el usuario exista y esté `activo`; si todo va bien coloca el `UsuarioPrincipal` en el `SecurityContext`. Si algo falla no autentica (el `AuthenticationEntryPoint` responde 401 en JSON).
+
+---
+## FRONTEND
+
+### §5 Proyecto y archivos
+- React + Vite (JavaScript, sin TypeScript), `react-router-dom` v6, `axios`, `leaflet` y `react-leaflet`.
+- `.env.development`: `VITE_API_URL=http://localhost:9250/api` · `.env.production`: `VITE_API_URL=/api`.
+- El CSS de diseño se copia de `diseno/css/estilos.css` a `src/styles/estilos.css` y se importa una sola vez en `main.jsx`. Las clases nuevas que haga falta (modal, mensajes, cargando, errores de campo) se **agregan al final de ese mismo archivo** usando las variables de `:root`; no hay otro CSS.
+- Token: `sessionStorage`, clave `rutaoax_token`.
+
+```
+src/
+  main.jsx · App.jsx (rutas)
+  api/        http.js · errores.js · authApi.js · perfilApi.js
+  auth/       AuthContext.jsx · ProtectedRoute.jsx · RoleRoute.jsx · rutas.js
+  components/ui/      Field.jsx · Feedback.jsx · Modal.jsx · ConfirmDialog.jsx · StatusBadge.jsx
+  components/layout/  AppLayout.jsx · Sidebar.jsx · Topbar.jsx · menus.js
+  pages/auth/         LoginPage.jsx · RegistroPage.jsx · RecuperarPage.jsx · RestablecerPage.jsx
+  pages/              PaginaPendiente.jsx · NoAutorizado.jsx · perfil/PerfilPage.jsx
+  utils/      validaciones.js · format.js
+  styles/     estilos.css
+```
+
+### §6 Módulos compartidos (firmas exactas)
+```js
+// api/http.js
+export default http;                         // instancia axios con baseURL=VITE_API_URL y Authorization automático
+export function getToken(); export function setToken(t); export function clearSession();
+// Interceptor: 401 con token guardado (y no en /auth/login) → clearSession() y redirige a /login.
+
+// api/errores.js
+export function leerError(err) -> { status, mensaje, errores /* {campo: texto} */, esRed /* true si no hubo respuesta */ }
+
+// api/authApi.js
+login(email, password) -> { token, tipo, expiraEn, usuario }
+register(datos) -> usuario          // datos = { nombre, email, password, telefono, tipoCuenta, nombreNegocio }
+logout() -> void
+me() -> usuario
+forgotPassword(email) -> void
+resetPassword(token, password) -> void
+
+// api/perfilApi.js
+getPerfil() · updatePerfil({nombre, telefono, avatarUrl}) · cambiarPassword({actual, nueva})
+
+// auth/AuthContext.jsx
+<AuthProvider> y useAuth() -> { usuario, cargando, login(email,password) /*devuelve usuario*/,
+   registrar(datos), logout(), refrescar(), tieneRol(rol) }
+// Al montar: si hay token llama me(); si falla limpia la sesión. "cargando" es true hasta terminar.
+
+// auth/rutas.js
+export function rutaInicio(usuario)   // ADMIN→/admin/usuarios · NEGOCIO→/negocio ·
+                                      // REPARTIDOR→ tipoRepartidor==='EMPRESA' ? '/repartidor' : '/independiente' · CLIENTE→/cliente
+// auth/ProtectedRoute: exige sesión (si no, /login). Usa <Outlet/>.
+// auth/RoleRoute props { roles: string[], tipoRepartidor?: 'EMPRESA'|'INDEPENDIENTE' }: si no cumple → <NoAutorizado/>.
+
+// utils/validaciones.js
+export const REGEX_PASSWORD = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+validarRequerido(v, nombre) · validarEmail(v) · validarPasswordSegura(v) · validarTelefono(v)  // devuelven '' si está bien o el mensaje de error
+```
+
+### §7 Componentes de interfaz (firmas)
+```jsx
+<Field label name type value onChange onBlur error ...inputProps />   // etiqueta + input + mensaje de error debajo (clase del CSS)
+<Cargando />  <ErrorRed mensaje onReintentar />  <Vacio mensaje />  <Mensaje tipo="ok|error">texto</Mensaje>
+<Modal abierto titulo onCerrar pie>…</Modal>
+<ConfirmDialog abierto titulo mensaje textoConfirmar peligroso cargando onConfirmar onCancelar />
+<StatusBadge estado />        // PENDIENTE→e-pend · ASIGNADO/EN_CAMINO→e-cam · ENTREGADO→e-ok · NO_ENTREGADO→e-no
+<PaginaPendiente titulo />    // "Esta pantalla se construye en un día posterior"
+```
+`components/layout/menus.js` exporta `menuPara(usuario)` que devuelve el arreglo `[{ ruta, texto }]`:
+- NEGOCIO: `/negocio` Panel · `/negocio/pedidos` Pedidos y asignación · `/negocio/equipo` Equipo de reparto · `/negocio/vehiculos` Vehículos · `/negocio/mensajes` Mensajes
+- REPARTIDOR empresa: `/repartidor` Mi ruta de hoy · `/repartidor/historial` Historial
+- REPARTIDOR independiente: `/independiente` Entregas disponibles · `/independiente/ruta` Mi ruta y mapa · `/independiente/mensajes` Mensajes
+- CLIENTE: `/cliente` Mi pedido · `/cliente/mensajes` Mensajes
+- ADMIN: `/admin/usuarios` Usuarios · `/admin/pedidos` Pedidos · `/admin/vehiculos` Vehículos · `/admin/notificaciones` Notificaciones
+El independiente usa `<aside class="side morado">`; el resto, `side`. Estructura del HTML igual a los diseños (`.marca`, `.rol`, enlaces con clase `on` para la ruta activa).
+
+Los días siguientes solo agregan páginas en `pages/<rol>/` y las enchufan en `App.jsx` reemplazando el `PaginaPendiente` de esa ruta. **No tocan layout, menús, auth ni `http.js`.**
+
+
+---
+## ANEXO · Agregado en la Parte 2 (HU-03 y HU-04). Esto ya existe en el código.
+
+### Backend
+- `auth.dto.TipoCuenta`: `CLIENTE, NEGOCIO, INDEPENDIENTE`. `auth.dto.RegisterRequest(nombre, email, password, telefono, tipoCuenta, nombreNegocio)`.
+- **Convención de validación:** un método `@AssertTrue` llamado `isXxxValido()` reporta su error en el campo `xxx` (lo traduce `GlobalExceptionHandler`). Ejemplo: `isNombreNegocioValido()` → `errores.nombreNegocio`.
+- `auth.JwtService` agrega `Claims parse(String token)` (lanza `JwtException` si es inválido). El token se firma con HS256.
+- `auth.UsuarioPrincipal.desde(Usuario)`: fábrica estática. En controladores: `@AuthenticationPrincipal UsuarioPrincipal yo`.
+- `auth.JwtFilter` **no es un `@Component`**: `SecurityConfig` lo crea con `new JwtFilter(JwtService, UsuarioRepository, TokenRevocadoRepository)` y lo coloca antes de `UsernamePasswordAuthenticationFilter`.
+- `config.ApiErrorWriter.escribir(req, res, HttpStatus, mensaje)`, `config.RestAuthenticationEntryPoint` (401) y `config.RestAccessDeniedHandler` (403): escriben el JSON de `ApiError` desde la capa de seguridad.
+- `config.SecurityConfig` (versión real): sin estado, CSRF desactivado, CORS desde `app.cors.allowed-origins`, públicas `/api/auth/login`, `/register`, `/forgot-password`, `/reset-password`; el resto autenticado. **HU-08 agrega** `@EnableMethodSecurity` y las reglas por rol de la matriz, **modificando este mismo archivo**.
+- `auth.AuthService`: `login(LoginRequest)`, `register(RegisterRequest)`, `me(Long usuarioId)`. HU-05 y HU-06 agregan `logout`, `forgotPassword` y `resetPassword` aquí.
+- Los correos se guardan en minúsculas y sin espacios (`trim().toLowerCase()`) al registrar y al iniciar sesión.
+- `GET /api/auth/me`, `POST /api/auth/login` y `POST /api/auth/register` ya existen. `/auth/logout`, `/forgot-password`, `/reset-password` y `/perfil/**` **todavía no**.
+
+### Frontend
+- `Field` acepta `as` (`"input"` por defecto, `"select"`, `"textarea"`) y `children` (para las `<option>`).
+- Ya existen: `auth/ProtectedRoute`, `auth/RoleRoute`, `auth/RedirectInicio`, `pages/NoAutorizado` y `pages/auth/AuthShell` (el diseño de dos paneles que comparten login, registro y recuperación).
+- `components/layout/menus.js` exporta `menuPara(usuario)`, `esIndependiente(usuario)` y `etiquetaRol(usuario)`.
+- `utils/validaciones.js` también exporta `requisitosPassword(valor)` (lista de requisitos con `cumple`).
+- `Topbar` ya tiene el menú de usuario: "Mi perfil" (`/perfil`) y "Cerrar sesión" (llama a `authApi.logout()` y, falle o no, limpia la sesión del navegador).
+- `App.jsx` agrupa las rutas por `RoleRoute`. **Los días siguientes solo cambian el `element` de cada ruta**: reemplazan `<PaginaPendiente titulo="..." />` por la página real; no se tocan layout, menús, auth ni `http.js`.
+- Las páginas `RecuperarPage` y `RestablecerPage` son marcadores; HU-06 las completa. `/perfil` es un marcador; HU-07 lo completa.
