@@ -124,6 +124,25 @@ public class PedidoService {
         }
     }
 
+    @Transactional
+    public PedidoDTO publicar(UsuarioPrincipal yo, Long id) {
+        Negocio negocio = contexto.negocioDe(yo);
+        Pedido p = pedidos.detalle(id)
+                .filter(x -> x.getNegocio() != null && x.getNegocio().getId().equals(negocio.getId()))
+                .orElseThrow(() -> new NotFoundException("El pedido no existe"));
+        if (p.getEstado() != EstadoPedido.PENDIENTE) {
+            throw new ConflictException("Solo se puede publicar un pedido sin asignar");
+        }
+        if (p.getModalidad() == Modalidad.ABIERTO) {
+            throw new ConflictException("Este pedido ya está publicado para repartidores independientes");
+        }
+        p.setModalidad(Modalidad.ABIERTO);
+        if (p.getOrigen() == null) {
+            p.setOrigen(negocio.getNombre());
+        }
+        return PedidoDTO.from(pedidos.save(p));
+    }
+
     /** Pedido que el usuario puede modificar: del negocio del usuario, o cualquiera si es administrador. */
     private Pedido buscarGestionable(UsuarioPrincipal yo, Long id) {
         Long negocioId = contexto.ambito(yo);

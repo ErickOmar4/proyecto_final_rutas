@@ -77,6 +77,18 @@ public class PedidoController {
         return asignacion.asignar(yo, req);
     }
 
+    @PostMapping("/{id}/publicar")
+    @PreAuthorize("hasRole('NEGOCIO')")
+    public PedidoDTO publicar(@AuthenticationPrincipal UsuarioPrincipal yo, @PathVariable Long id) {
+        return servicio.publicar(yo, id);
+    }
+
+    @PostMapping("/{id}/reasignar")
+    @PreAuthorize("hasRole('NEGOCIO')")
+    public PedidoDTO reasignar(@AuthenticationPrincipal UsuarioPrincipal yo, @PathVariable Long id) {
+        return asignacion.reasignar(yo, id);
+    }
+
     @PostMapping("/{id}/desasignar")
     @PreAuthorize("hasRole('NEGOCIO')")
     public PedidoDTO desasignar(@AuthenticationPrincipal UsuarioPrincipal yo, @PathVariable Long id) {

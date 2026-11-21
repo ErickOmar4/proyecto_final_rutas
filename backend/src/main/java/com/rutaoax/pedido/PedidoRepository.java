@@ -1,5 +1,6 @@
 package com.rutaoax.pedido;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -42,6 +43,12 @@ public interface PedidoRepository extends JpaRepository<Pedido, Long> {
     List<Pedido> findByRecorridoIdOrderByOrdenParada(Long recorridoId);
 
     long countByRecorridoId(Long recorridoId);
+
+    long countByNegocioIdAndEstado(Long negocioId, EstadoPedido estado);
+
+    long countByNegocioIdAndEstadoAndActualizadoEnGreaterThanEqual(Long negocioId, EstadoPedido estado, LocalDateTime desde);
+
+    List<Pedido> findTop5ByNegocioIdAndEstadoOrderByActualizadoEnDesc(Long negocioId, EstadoPedido estado);
 
     /** Por recorrido: [recorridoId, total de pedidos, pedidos entregados]. */
     @Query("select p.recorrido.id, count(p), sum(case when p.estado = com.rutaoax.pedido.EstadoPedido.ENTREGADO then 1 else 0 end)"

@@ -148,6 +148,22 @@ public class AsignacionService {
         return PedidoDTO.from(p);
     }
 
+    /** Un pedido que no se pudo entregar vuelve a estar sin asignar y sale de su recorrido. */
+    @Transactional
+    public PedidoDTO reasignar(UsuarioPrincipal yo, Long pedidoId) {
+        Negocio negocio = contexto.negocioDe(yo);
+        Pedido p = pedidos.detalle(pedidoId)
+                .filter(x -> x.getNegocio() != null && x.getNegocio().getId().equals(negocio.getId()))
+                .orElseThrow(() -> new NotFoundException("El pedido no existe"));
+        if (p.getEstado() != EstadoPedido.NO_ENTREGADO) {
+            throw new ConflictException("Solo se puede reasignar un pedido que no se pudo entregar");
+        }
+        p.setRecorrido(null);
+        p.setOrdenParada(null);
+        p.setEstado(EstadoPedido.PENDIENTE);
+        return PedidoDTO.from(pedidos.save(p));
+    }
+
     /** Último punto del recorrido si ya tiene paradas; si no, el Centro Histórico. */
     private double[] puntoDePartida(Long recorridoId, long paradasActuales) {
         if (paradasActuales > 0) {
